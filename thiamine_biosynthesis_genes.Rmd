@@ -1,0 +1,176 @@
+---
+title: "Thiamine Biosynthesis Gene Search"
+author: "Kai Trepka"
+date: "3/14/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, cache = T, message = F, warning = F)
+```
+
+# Core analysis 
+
+Packages 
+```{r}
+# Install/load packages
+if(!require(KEGGREST)){BiocManager::install("KEGGREST")} # kegg package
+if(!require(tidyverse)){install.packages("tidyverse")} # data wrangling
+if(!require(readxl)){install.packages("readxl")} # read excel files
+if (!require("rBLAST")) install.packages("rBLAST") # For BLAST functions
+if (!require("Biostrings")) install.packages("Biostrings") # For strings
+if (!require("msa")) install.packages("msa")  # For msa
+if (!require("seqinr")) install.packages("seqinr") # For alignment distances
+if (!require("gplots")) install.packages("gplots") # For heatmap.2
+if (!require("DECIPHER")){install.packages("DECIPHER")} # view alignments
+if (!require("tidyverse")){install.packages("tidyverse")} # Tidy
+if (!require("dplyr")){install.packages("dplyr")} # Tidy
+
+# Working directory
+setwd("/mnt/tank/labmainshare/qb3share/ktrepka/CeciliaProjects/ThiamineBiosynthesis/")
+savedir <- "/mnt/tank/labmainshare/qb3share/ktrepka/CeciliaProjects/ThiamineBiosynthesis/results/"
+filedir <- "/mnt/tank/labmainshare/qb3share/ktrepka/CeciliaProjects/ThiamineBiosynthesis/"
+
+```
+
+Download all known thiazole tautomerase protein sequences: https://www.genome.jp/entry/K10810. Downloaded all database results manually on March 11, 2022 because keggGet("ko:k10810") was not working.
+
+```{r}
+testgenes <- c("hsa:10458", "ece:Z5100") 
+
+# Read in file + reformat
+tt <- data.frame(read_excel("thiazole_tautomerase_031122.xlsx", skip = 0))
+tt <- tt %>% separate(gene, into = c("name", "description"), sep = "\\s",
+         extra = "merge")
+
+# Filter for genes of interest
+genes <- tt$name[grepl("tenI; thiazo", tt$description)] # Filter only for thiazole tautomerase, not thiE or transcription regulators
+
+# Iterate over genes, returning sequences one at a time and appending
+aas <- tryCatch(keggGet(genes[1], "aaseq"), error=function(e) NULL)
+nts <- tryCatch(keggGet(genes[1], "ntseq"), error=function(e) NULL)
+for (i in 2:length(genes)){
+  aa <- tryCatch(keggGet(genes[i], "aaseq"), error=function(e) NULL)
+  nt <- tryCatch(keggGet(genes[i], "ntseq"), error=function(e) NULL)
+  aas <- c(aas, aa); nts <- c(nts, nt)
+}
+
+```
+
+Make a blast database
+```{r}
+# Set BLAST exe location and reference (ffn) files
+Sys.setenv(PATH = paste("/mnt/tank/labmainshare/qb3share/ktrepka/RotationFiles/Siderophore_Sequences/ncbi_blast_2120/bin/", sep= ""))
+reference_aa <- "/mnt/tank/labmainshare/qb3share/ktrepka/CeciliaProjects/ThiamineBiosynthesis/dsm2243_proteome_ncbi/elen_kegg_genome_ncbi.faa"
+```
+
+BLAST. Either have more target seqs and filter later, or only a few target seqs and keep all
+```{r}
+# Make blast database and prepare BLAST
+makeblastdb(reference_aa, dbtype = "prot") 
+blaa <- blast(db=reference_aa, type='blastp')
+hits_all <- predict(blaa, aas, BLAST_args="-max_target_seqs 30 -task blastp")
+filename = paste0(savedir, 'blast_TenI_aa.csv')
+write.csv(hits_all, filename, row.names = FALSE)
+```
+
+MSA
+```{r, include = TRUE}
+# Read genome and extract sequences of genes of interest
+hits_all <- hits_all %>% filter(Alignment.Length > 150) # Filter to alignment length > 150
+genome <- readAAStringSet(reference_aa, format = 'fasta')
+goi_names <- unique(hits_all$SubjectID)
+goi <- genome[unique(grep(paste(substring(goi_names, 5), collapse="|"), 
+                          names(genome), value=TRUE))]
+
+# Perform MSAs - use amino acid residues
+msaseqs <- c(aas, goi)
+#msaseqs <- msaseqs[width(msaseqs) < 800] # Filter for specific length
+alignment <- msa(msaseqs)
+
+# Print results
+alignment_seqinr <- msaConvert(alignment, type=c("seqinr::alignment")) # Convert for interoperability 
+aligndist <- as.matrix(dist.alignment(alignment_seqinr)) # Convert protein distance
+rownames(aligndist) <- gsub("\\ .*", "", rownames(aligndist)) # Make names manageable
+colnames(aligndist) <- gsub("\\ .*", "", colnames(aligndist))
+pdf(file = paste0(savedir,'tenI_msa.pdf'), height = 10, width = 15) # Make graphics device and print
+heatmap.2(aligndist, 
+          cexRow = 1,
+          margins = c(5,20), 
+          dendrogram = 'row', 
+          labCol = FALSE, 
+          key = TRUE)
+dev.off()
+
+# Display
+heatmap.2(aligndist, 
+          cexRow = 0.5,
+          margins = c(5,20), 
+          dendrogram = 'row', 
+          labCol = FALSE, 
+          key = TRUE)
+
+
+# Decipher alignment and viewing
+aligned <- AlignSeqs(msaseqs)
+BrowseSeqs(aligned)
+```
+
+Next, we want to see if one of the thiamine monophosphate synthase genes is actually more similar to thiazole tautomerase. I manually curated the names of all thiamine phosphate synthase genes (https://www.genome.jp/dbget-bin/www_bget?ec:2.5.1.3) on March 14, 2022 that matched the species for which we have annotated tenI protein sequences. 
+```{r}
+# Read in thiamine phosphate synthase (tp) genes + reformat
+tp <- data.frame(read_excel("thiamine_phosphate_synthase_manual.xlsx", skip = 0))
+genes_tp <- tp$gene
+
+# Iterate over genes, returning sequences one at a time and appending
+aas_tp <- tryCatch(keggGet(genes_tp[1], "aaseq"), error=function(e) NULL)
+for (i in 2:length(genes_tp)){
+  aa <- tryCatch(keggGet(genes_tp[i], "aaseq"), error=function(e) NULL)
+  aas_tp <- c(aas_tp, aa)
+}
+```
+
+```{r}
+# Select genes of interest manually if relevant
+goi_tp_names <- c("lcl|CP001726.1_prot_ACV56025.1_2030", "lcl|CP001726.1_prot_ACV55710.1_1715")
+goi_tp <- genome[unique(grep(paste(substring(goi_tp_names, 5), collapse="|"), 
+                          names(genome), value=TRUE))]
+msaseqs_tp <- c(aas_tp, aas, goi_tp) # Combine with tp and tautomerase stringsets
+alignment <- msa(msaseqs_tp) # Align
+
+# Print results
+alignment_seqinr <- msaConvert(alignment, type=c("seqinr::alignment")) # Convert for interoperability 
+aligndist <- as.matrix(dist.alignment(alignment_seqinr)) # Convert protein distance
+rownames(aligndist) <- gsub("\\[.*", "", rownames(aligndist)) # Make names manageable
+colnames(aligndist) <- gsub("\\[.*", "", colnames(aligndist)) # Make names manageable
+pdf(file = paste0(savedir, 'tenI_thiE_msa.pdf'), height = 10, width = 15) # Make graphics device and print
+heatmap.2(aligndist, 
+          cexRow = 1,
+          margins = c(5,40), 
+          dendrogram = 'row', 
+          labCol = FALSE, 
+          key = TRUE)
+dev.off()
+
+# Display
+heatmap.2(aligndist, 
+          cexRow = 0.5,
+          margins = c(5,20), 
+          dendrogram = 'row', 
+          labCol = FALSE, 
+          key = TRUE)
+
+# Look at alignment
+aligned <- AlignSeqs(msaseqs_tp)
+BrowseSeqs(aligned, htmlFile = paste0(savedir, 'tenI_thiE_msa.html'))
+
+```
+
+# Results
+Genes of interest from the BLAST search included the following: 
+ - Elen_1745: lcl|CP001726.1_prot_ACV55710.1_1715 [locus_tag=Elen_1745] [db_xref=InterPro:IPR003733] [protein=thiamine monophosphate synthase] [protein_id=ACV55710.1] [location=complement(2052852..2053487)] [gbkey=CDS]
+ - Elen_2062: lcl|CP001726.1_prot_ACV56025.1_2030 [locus_tag=Elen_2062] [db_xref=InterPro:IPR003733] [protein=thiamine-phosphate pyrophosphorylase] [protein_id=ACV56025.1] [location=complement(2428195..2428845)] [gbkey=CDS]
+ 
+Although both of these genes are annotated as thiamine phosphate synthase, the proteins look different from one another, and align imperfectly to both thiamine phosphate synthase and thiazole tautomerase protein sequences. 
+
+Based on this analysis, Elen_1745 should be newly annotated as thiazole tautomerase. It has the conserved H122 residue necessary for this enzyme's active site (https://pubs.acs.org/doi/abs/10.1021/ja1110514). Meanwhile, Elen_2062 is correctly labeled as thiamine-phosphate pyrophosphorylase. It has a conserved cysteine active site (https://link.springer.com/article/10.1186/s12866-014-0260-0, https://www.liebertpub.com/doi/full/10.1089/ars.2013.5423), as well as all of the conserved active site residues Q57, R59, K61, N92, D93, D112, S130, T156, T158, K159, G188, and either I208 or S209 (https://pubs.acs.org/doi/full/10.1021/bi0104726. Note that the numbers don't correspond perfectly, i.e. R59 in the paper is R47 in our alignment, but all residues have this nearly identical constant offset!) To contrast, Elen_1745 shares only the cysteine residue, R59, K61, K159, and G188.
